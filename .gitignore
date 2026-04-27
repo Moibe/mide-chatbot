@@ -5,5 +5,7 @@
 hooks.json
 debug_mide.log*
 logs.db*
+config_lightbot.json
+config_contextlight.json
 .env
 .claude/

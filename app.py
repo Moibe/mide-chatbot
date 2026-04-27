@@ -118,6 +118,17 @@ class LogRequest(BaseModel):
     ms: int
     error: Optional[str] = None
 
+class LightbotConfig(BaseModel):
+    contexto: str
+    modelo: str
+    historial: int
+
+class ContextlightConfig(BaseModel):
+    contexto: str
+
+LIGHTBOT_CONFIG_FILE = Path("config_lightbot.json")
+CONTEXTLIGHT_CONFIG_FILE = Path("config_contextlight.json")
+
 @app.get("/listarContextos",
          tags=["Contextos"])
 def listar_contextos():
@@ -438,6 +449,52 @@ async def info_modelo(modelo: str):
         raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar info del modelo: {e}")
+
+@app.get("/configLightbot",
+         tags=["Configuración"],
+         description="Obtiene la configuración guardada del Lightbot para este ambiente.",
+         summary="Obtener config Lightbot")
+def get_lightbot_config():
+    if not LIGHTBOT_CONFIG_FILE.exists():
+        raise HTTPException(status_code=404, detail="No hay configuración guardada para Lightbot.")
+    try:
+        return json.loads(LIGHTBOT_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al leer configuración: {e}")
+
+@app.post("/configLightbot",
+          tags=["Configuración"],
+          description="Guarda la configuración del Lightbot para este ambiente.",
+          summary="Guardar config Lightbot")
+def set_lightbot_config(cfg: LightbotConfig):
+    try:
+        LIGHTBOT_CONFIG_FILE.write_text(json.dumps(cfg.dict(), ensure_ascii=False), encoding="utf-8")
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al guardar configuración: {e}")
+
+@app.get("/configContextlight",
+         tags=["Configuración"],
+         description="Obtiene la configuración guardada del Contextlight para este ambiente.",
+         summary="Obtener config Contextlight")
+def get_contextlight_config():
+    if not CONTEXTLIGHT_CONFIG_FILE.exists():
+        raise HTTPException(status_code=404, detail="No hay configuración guardada para Contextlight.")
+    try:
+        return json.loads(CONTEXTLIGHT_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al leer configuración: {e}")
+
+@app.post("/configContextlight",
+          tags=["Configuración"],
+          description="Guarda la configuración del Contextlight para este ambiente.",
+          summary="Guardar config Contextlight")
+def set_contextlight_config(cfg: ContextlightConfig):
+    try:
+        CONTEXTLIGHT_CONFIG_FILE.write_text(json.dumps(cfg.dict(), ensure_ascii=False), encoding="utf-8")
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al guardar configuración: {e}")
 
 @app.get("/health",
          tags=["Utilidad"],
