@@ -8,8 +8,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import traceback
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import funciones
 import chatbot as asistente
 import generacion_aumentada
@@ -85,6 +87,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+
+def _cors_headers_para(request: Request) -> dict:
+    """Header Access-Control-Allow-Origin apropiado para esta petición.
+
+    Necesario porque las respuestas de error 500 NO controladas las genera el
+    ServerErrorMiddleware, que está POR FUERA del CORSMiddleware. Sin esto, el
+    navegador reporta un (confuso) error de CORS en lugar del error real del
+    backend. Aquí lo añadimos a mano replicando la lógica de allow_origins.
+    """
+    origin = request.headers.get("origin")
+    if allowed_origins == ["*"]:
+        return {"Access-Control-Allow-Origin": "*"}
+    if origin and origin in allowed_origins:
+        return {"Access-Control-Allow-Origin": origin}
+    return {}
+
+
+@app.exception_handler(Exception)
+async def excepcion_no_controlada(request: Request, exc: Exception):
+    """Red de seguridad: convierte cualquier excepción no controlada en un 500
+    con cuerpo JSON y, sobre todo, CON header CORS — para que el frontend reciba
+    el error de verdad en vez de un opaco bloqueo de CORS."""
+    logger.error("Excepcion no controlada en %s %s: %s", request.method, request.url.path, exc)
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Error interno del servidor: {exc}"},
+        headers=_cors_headers_para(request),
+    )
 
 # Definir la carpeta temporal para los archivos y la carpeta de la base de datos vectorial
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
@@ -360,7 +392,23 @@ def chatbot(data: ChatRequest):
     print(f"Query: {data.pregunta}")
     print(f"Historial: {data.historial}")
 
-    response = asistente.chat(data.pregunta, data.historial, data.contexto, data.modelo_llm)
+    try:
+        response = asistente.chat(data.pregunta, data.historial, data.contexto, data.modelo_llm)
+    except Exception as e:
+        # Causa típica: el modelo configurado es de OpenAI (gpt-*) y el server no
+        # tiene salida a internet / la API key falla, así que llm.invoke() truena.
+        # Lo convertimos en un 502 claro (con CORS) en vez de un 500 opaco.
+        logger.exception("Error al invocar el modelo en /chatbot")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"El modelo de lenguaje '{data.modelo_llm}' no respondió. "
+                f"Si es un modelo OpenAI (gpt-*), verifica que el servidor tenga "
+                f"salida a internet y una API key válida; o usa un modelo local de "
+                f"Ollama. Detalle técnico: {e}"
+            ),
+        )
+
     print("Respuesta: ", response)
     if response:
         return {"Mensaje": response}
