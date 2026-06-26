@@ -9,9 +9,10 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
 import traceback
+import mimetypes
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import funciones
 import chatbot as asistente
 import generacion_aumentada
@@ -121,8 +122,20 @@ async def excepcion_no_controlada(request: Request, exc: Exception):
 # Definir la carpeta temporal para los archivos y la carpeta de la base de datos vectorial
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 DB_FOLDER = os.getenv('VECTOR_DB_FOLDER', './vector_db')
+# Carpeta donde se conserva una copia del documento ORIGINAL subido, para poder
+# visualizarlo después desde el admin (Chroma solo guarda los chunks, no el archivo).
+DOCS_FOLDER = os.getenv('DOCS_FOLDER', './documentos')
 Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
+Path(DOCS_FOLDER).mkdir(parents=True, exist_ok=True)
+
+
+def _ruta_documento_original(contexto: str, filename: str) -> str:
+    """Ruta segura del original conservado: DOCS_FOLDER/<contexto>/<archivo>.
+    Sanitiza contexto y filename a su basename para evitar path traversal (../)."""
+    safe_contexto = os.path.basename((contexto or "").strip())
+    safe_filename = os.path.basename((filename or "").strip())
+    return os.path.join(DOCS_FOLDER, safe_contexto, safe_filename)
 
 class ChatRequest(BaseModel):
     contexto: str = None 
@@ -258,10 +271,18 @@ def borrar_contexto(contexto: str):
     """
     try:
         funciones.delete_contexto(contexto)
-            
+
+        # Borrar también la carpeta de originales conservados de ese contexto.
+        try:
+            carpeta = os.path.join(DOCS_FOLDER, os.path.basename((contexto or "").strip()))
+            if os.path.isdir(carpeta):
+                shutil.rmtree(carpeta)
+        except Exception as e:
+            logger.warning("No se pudo eliminar la carpeta de originales de '%s': %s", contexto, e)
+
         return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
     except Exception as e:
-        return {"error": f"Error al borrar contexto: {e}"}    
+        return {"error": f"Error al borrar contexto: {e}"}
 
 @app.get("/listarDocumentos",
          tags=["Documentos"],
@@ -341,6 +362,15 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             
             if resultado['success']:
                 print("Documento integrado exitosamente..")
+                # Conservar una copia del original para poder verlo luego desde el admin.
+                # (Se hace aquí, antes del finally que borra el archivo temporal.)
+                try:
+                    destino = _ruta_documento_original(contexto, documento.filename)
+                    os.makedirs(os.path.dirname(destino), exist_ok=True)
+                    shutil.copyfile(file_path, destino)
+                    print(f"[OK] Original conservado en: {destino}", flush=True)
+                except Exception as copia_err:
+                    logger.warning("No se pudo conservar copia del original '%s': %s", documento.filename, copia_err)
                 return {"mensaje": resultado['message']}
             else:
                 print(f"Error al embeber archivo: {resultado['message']}")
@@ -378,10 +408,48 @@ def borrar_documento(data: DeleteRequest):
         )
         
         print("Archivo borrado...")
+        # Borrar también la copia del original conservada (si existe).
+        try:
+            ruta_original = _ruta_documento_original(data.contexto, data.filename)
+            if os.path.isfile(ruta_original):
+                os.remove(ruta_original)
+                print(f"[OK] Original eliminado: {ruta_original}", flush=True)
+        except Exception as e:
+            logger.warning("No se pudo eliminar el original de '%s': %s", data.filename, e)
         return {"Mensaje": f"Archivo {data.filename} borrado correctamente del contexto: {data.contexto}."}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
+
+
+@app.get("/verDocumento",
+         tags=["Documentos"],
+         description="Devuelve el archivo ORIGINAL subido (inline) para visualizarlo en el navegador.",
+         summary="Ver Documento")
+def ver_documento(contexto: str, filename: str):
+    """Sirve el documento original conservado para un contexto/archivo dados."""
+    ruta = _ruta_documento_original(contexto, filename)
+
+    # Defensa en profundidad contra path traversal.
+    if not os.path.realpath(ruta).startswith(os.path.realpath(DOCS_FOLDER)):
+        raise HTTPException(status_code=400, detail="Ruta de documento inválida.")
+
+    if not os.path.isfile(ruta):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No se encontró el original de '{filename}'. Es posible que se haya "
+                f"subido antes de activar esta función; vuelve a subirlo para poder verlo."
+            ),
+        )
+
+    media_type = mimetypes.guess_type(ruta)[0] or "application/octet-stream"
+    return FileResponse(
+        ruta,
+        media_type=media_type,
+        filename=os.path.basename(filename),
+        content_disposition_type="inline",  # que el navegador lo muestre, no lo descargue
+    )
 
 @app.post("/chatbot",
           tags=["Chatbot"])
