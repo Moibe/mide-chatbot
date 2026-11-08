@@ -3,7 +3,8 @@ unstructured
 langchain
 langchain-text-splitters
 langchain_core
-fastapi 
+fastapi
+python-multipart
 langchain_community
 langchain-core
 werkzeug
